@@ -1,5 +1,5 @@
-# Geo-NeW
-General Geometry Neural Whitney Forms for PDEs on complex geometries
+![Geo-NeW logo](geo_new_logo.png)
+General Geometry Neural Whitney Forms (Geo-New) for PDEs on complex geometries
 
 Code accompanying ICML 2026 Submission **Structure-Preserving Learning Improves Geometry Generalization in Neural PDEs**.
 
