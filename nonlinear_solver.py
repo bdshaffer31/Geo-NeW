@@ -4,9 +4,10 @@ import numpy as np
 from scipy.optimize import root
 
 class IFTNewtonSolver(torch.autograd.Function):
-    # this function is a bit of a mess but jsut don't mess with it too much
-    # it works well enough and is fairly flexible
-
+    # differntiable Newton's method solver for G(u, *args) = 0 using implicit function theorem for backward pass.
+    # can handler models-as-arguments by manually updating the shared module parameters in the backward pass,
+    # which may be fragile compared to a functional approach but allows more flexibility in how the model is used inside G.
+ 
     # notes:
     # only works for batched inputs (or non tensor args)
     # not implemented line search or trust region
@@ -240,36 +241,3 @@ if __name__ == "__main__":
 
     # call the solve with some batched tensor and some functions
     u_star = solver(u_init, a, b, c_model)
-
-    # now compute any loss function of u_star
-    # or use as the input to another network (decoder)
-    # gradients will flow back to u_init, a, b as needed
-    def some_fn(u):
-        return (u**3) - 2 * u + 1
-
-    result = some_fn(u_star)
-    loss = result.sum()
-    loss.backward()
-
-    print("u_star:", u_star)
-    print("u_init.grad:", u_init.grad)
-    print("a.grad:", a.grad)
-    print("b.grad:", b.grad)
-    for name, param in c_model.named_parameters():
-        if param.requires_grad:
-            print(f"c_model param {name} grad:", param.grad)
-
-    # demo training loop, print c_model params:
-    optimizer = torch.optim.Adam(c_model.parameters(), lr=1e-2)
-    for step in range(10):
-        optimizer.zero_grad()
-        u_init = torch.randn(B, 1, requires_grad=True)
-        u_star = solver(u_init, a, b, c_model)
-        result = some_fn(u_star)
-        loss = (result**2).sum()
-        loss.backward()
-        optimizer.step()
-        print(f"Step {step}, Loss: {loss.item()}")
-        for name, param in c_model.named_parameters():
-            if param.requires_grad:
-                print(f"c_model param {name} grad:", param.grad)
