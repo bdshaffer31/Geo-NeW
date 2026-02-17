@@ -2,9 +2,8 @@
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import utils
 
+import src.utils as utils
 
 
 # inducing point encoder
@@ -53,17 +52,17 @@ class InducingPointEncoder(nn.Module):
 
     def __init__(
         self,
-        in_dim: int,
-        d_model: int = 128,
-        nhead: int = 4,
-        n_anchors: int = 64,
-        num_anchor_layers: int = 4,
-        dropout: float = 0.01,
-        ffn_mult: int = 4,
-        return_anchors: bool = True,
-        use_output_residual: bool = False,
-        resample_anchors: bool = True,
-        anchor_select: str = "random",
+        in_dim,
+        d_model=128,
+        nhead=4,
+        n_anchors=64,
+        num_anchor_layers=4,
+        dropout=0.01,
+        ffn_mult=4,
+        return_anchors=True,
+        use_output_residual=False,
+        resample_anchors=True,
+        anchor_select="random",
         *args,
         **kwargs,
     ):
@@ -100,7 +99,7 @@ class InducingPointEncoder(nn.Module):
         nn.init.xavier_uniform_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
 
-    def sample_anchor_indices(self, B: int, N: int, device):
+    def sample_anchor_indices(self, B, N, device):
         M = min(self.n_anchors, N)
         # uniform random sampling without replacement
         idx = torch.stack(
@@ -109,7 +108,7 @@ class InducingPointEncoder(nn.Module):
         )
         return idx
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, tokens):
         B, N, _ = tokens.shape
         device = tokens.device
 
@@ -151,7 +150,6 @@ class InducingPointEncoder(nn.Module):
 # then combine them with the geometry encoders and poolers in the CNWF class
 # use these to define the residual and solve with the nonlinear solver.
 
-# # TODO verify the lipschitz regularity computation is correct
 class StableHyperFlux(nn.Module):
     """
     Solvability-safe antisymmetric flux with task-specific token processing:
@@ -159,29 +157,27 @@ class StableHyperFlux(nn.Module):
 
     def __init__(
         self,
-        n_fields: int,
-        latent_dim: int,
-        proj_dim: int = 16,
-        hidden: int = 128,
-        n_layers: int = 2,
+        n_fields,
+        latent_dim,
+        proj_dim=16,
+        hidden=128,
+        n_layers=2,
         proj_init_gain = 0.1,
-        lipschitz_max: float = None,
-        # lipschitz_scale: float = None,
-        n_flux_queries: int = 8,  # number of learnable queries for cross-attention
-        gamma_init: float = -2.0,  # initial value for gamma_raw parameter
-        beta_init: float = 0.0,  # initial value for beta_raw parameter
-        use_mean_features: bool = True, # use difference and mean of u_i u_j as features
-        # anti_symmetric: bool = True,  # enforce antisymmetric flux, actually not needed, always antisymettric
-        easein: int = 0,  # number of epochs to ease in nonlinearity multiplier
+        lipschitz_max=None,
+        n_flux_queries=8,
+        gamma_init=-2.0,
+        beta_init=0.0,
+        use_mean_features=True,
+        easein=0,
         # make the args options
-        use_base_ops: bool = True,
-        id_init_base: bool = True,
-        zero_init_ops: bool = True,
-        spectral_upper_bound: bool = False, # only enforce spectral normalization upper bound on operators
-        no_flux_conditioning: bool = False,
-        n_pous: int = 32,
+        use_base_ops=True,
+        id_init_base=True,
+        zero_init_ops=True,
+        spectral_upper_bound=False,
+        no_flux_conditioning=False,
+        n_pous=32,
         edge_pairs = None,
-        lumped_L: bool = True, # if lumped learn only diagonal of L factor
+        lumped_L=True,
     ):
         super().__init__()
         self.n_fields = n_fields
@@ -248,10 +244,6 @@ class StableHyperFlux(nn.Module):
         self.A0 = nn.Linear(self.op_dim, self.op_dim, bias=False)
         self.B0 = nn.Linear(self.op_dim, self.op_dim, bias=False)
         self.C0 = nn.Linear(self.op_dim, self.op_dim, bias=False)
-        # these can actually just be parameters, not linear layers
-        # self.A0 = nn.Parameter(torch.eye(self.op_dim))
-        # self.B0 = nn.Parameter(torch.eye(self.op_dim))
-        # self.C0 = nn.Parameter(torch.eye(self.op_dim))
         if self.id_init_base:
             nn.init.eye_(self.A0.weight)
             nn.init.eye_(self.B0.weight)
@@ -362,8 +354,7 @@ class StableHyperFlux(nn.Module):
             self.easein_scale.fill_(float(1 / max(1, self.easein - current_epoch)))
 
     def compute_normalizations(self, B):
-        # NOTE: This must not mutate buffers/params because the nonlinear solver
-        # uses torch.func transforms (jacrev/vmap).
+        # Must be purely functional; the nonlinear solver uses torch.func transforms.
         if self.lipschitz_max is None:
             beta_scale = torch.sigmoid(self.beta_raw)
             gamma_scale = torch.sigmoid(self.gamma_raw)

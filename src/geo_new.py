@@ -1,13 +1,12 @@
 import torch
 
-import utils
-from nonlinear_solver import NonlinearSolver
+import src.utils as utils
+from src.nonlinear_solver import NonlinearSolver
 
 
 # wrapper class to hold all components of the GeoNew model, and implement the forward pass and residual computation for the nonlinear solver
 class GeoNew(torch.nn.Module):
 
-    # TODO take an encoder as an argument, and take flux_args as a dict
     def __init__(
         self,
         encoder,
@@ -103,7 +102,7 @@ class GeoNew(torch.nn.Module):
         return K_hat_bc, M_hat_bc
     
     def forward(
-        self, in_tokens, query_tokens, adj, K_list, M_list, dirichlet_nodes, boundary_vals
+        self, in_tokens, K_list, M_list, dirichlet_nodes, boundary_vals # query_tokens, adj,
     ):
         B, N = in_tokens.shape[:2]
         delta_0, bilinear_mask, latent_mask, latent_boundary_vals = self.expand_masks(B)

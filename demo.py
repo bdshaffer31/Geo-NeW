@@ -1,137 +1,110 @@
 
 import torch
-
-from models import InducingPointEncoder, MLPSourceModel, MLPLearnableW, BoundaryWPerField, StableHyperFlux
-from geo_new import GeoNew
-
-import utils
+import src.utils as utils
 
 
-def _make_sparse_identity_list(B: int, N: int, device=None, dtype=torch.float32):
-    device = device or "cpu"
-    idx = torch.arange(N, device=device)
-    indices = torch.stack([idx, idx], dim=0)
-    values = torch.ones((N,), device=device, dtype=dtype)
-    I = torch.sparse_coo_tensor(indices, values, (N, N)).coalesce()
-    return [I for _ in range(B)]
-
-# revisit these args from original implementation
-def setup_GeoNew_model(
-        n_pou=16,
-        n_fields=3,
-        encoder_in_dim=2,
-        model_dim=128,
-        n_heads=4,
-        n_layers=4,
-        encoder_dropout=0.0,
-        resample_anchors=False,
-        w_alpha_init=0.5,
-        w_dropout=0.0,
-        w_temperature=1.0,
-        flux_dim=128,
-        flux_layers=4,
-        flux_lipschitz_max=1.0,
-        flux_gamma_init=1.0,
-        flux_mean_features=False,
-        flux_easein=False,
-        use_base_ops=False,
-        id_init_base=False,
-        zero_init_ops=False,
-        spectral_upper_bound=None,
-        no_flux_conditioning=False,
+def run_epoch(
+    geo_new,
+    loader,
+    optimizer,
+    train,
 ):
-    n_bc_pou = 3
-    full_n_pou = n_pou + n_bc_pou
+    """Run one epoch and return metrics."""
+    if train:
+        geo_new.train()
+    else:
+        geo_new.eval()
 
-    delta_0_template = utils.construct_delta0(full_n_pou)
-    # extract_edge_endpoints returns (pos_idx, neg_idx, edge_pairs)
-    edge_pairs = utils.extract_edge_endpoints(delta_0_template)[2]
+    total_rel = 0.0
+    total_conv = 0.0
+    n_batches = 0
 
-    encoder = InducingPointEncoder(
-        in_dim=encoder_in_dim,
-        d_model=model_dim,
-        nhead=n_heads,
-        num_anchor_layers=n_layers,
-        dropout=encoder_dropout,
-        resample_anchors=resample_anchors,
-    )
+    with torch.set_grad_enabled(train):
+        for batch in loader:
+            tokens = batch["tokens"]
+            K_list = batch["K"]
+            M_list = batch["M"]
+            dirichlet_nodes = batch["dirichlet_nodes"]
+            u_true = batch["fields"]
+            n_original_nodes = batch["n_original_nodes"]
 
-    source_model = MLPSourceModel(model_dim=model_dim, n_fields=n_fields)
+            boundary_vals = u_true * dirichlet_nodes.to(u_true.dtype)
 
-    w_inner = MLPLearnableW(
-        n_pou=n_pou,
-        n_fields=n_fields,
-        in_dim=model_dim,
-        model_dim=model_dim,
-        alpha_init=w_alpha_init,
-        dropout=w_dropout,
-    )
-    boundary_w = BoundaryWPerField(w_inner, temperature=w_temperature)
+            if train:
+                optimizer.zero_grad(set_to_none=True)
 
-    flux_model = StableHyperFlux(
-        n_fields=n_fields,
-        latent_dim=model_dim,
-        hidden=flux_dim,
-        n_layers=flux_layers,
-        lipschitz_max=flux_lipschitz_max,
-        gamma_init=flux_gamma_init,
-        use_mean_features=flux_mean_features,
-        easein=flux_easein,
-        n_pous=full_n_pou,
-        edge_pairs=edge_pairs,
-        use_base_ops=use_base_ops,
-        id_init_base=id_init_base,
-        zero_init_ops=zero_init_ops,
-        spectral_upper_bound=spectral_upper_bound,
-        no_flux_conditioning=no_flux_conditioning,
-    )
+            out = geo_new(
+                in_tokens=tokens,
+                K_list=K_list,
+                M_list=M_list,
+                dirichlet_nodes=dirichlet_nodes,
+                boundary_vals=boundary_vals,
+            )
+            u_pred = out["u_fine"]
 
-    geo_new = GeoNew(
-        encoder=encoder,
-        source_model=source_model,
-        boundary_w=boundary_w,
-        flux_model=flux_model,
-        n_pou=n_pou,
-        n_fields=n_fields,
-    )
-    return geo_new
-    
+            loss = utils.relative_l2_error_unpadded(u_true, u_pred, n_original_nodes)
+            if train:
+                loss.backward()
+                optimizer.step()
+
+            conv = out["converged"].float().mean()
+
+            total_rel += float(loss.detach().cpu())
+            total_conv += float(conv.detach().cpu())
+            n_batches += 1
+
+    denom = max(1, n_batches)
+    return total_rel / denom, total_conv / denom
+
 
 def main():
-    geo_new = setup_GeoNew_model()
+    torch.manual_seed(0)
 
-    # Minimal smoke test to validate forward I/O contracts.
-    B, N = 2, 32
-    n_fields = geo_new.n_fields
-    in_dim = geo_new.encoder.input_proj.in_features
-    device = next(geo_new.parameters()).device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    in_tokens = torch.randn(B, N, in_dim, device=device)
-    query_tokens = in_tokens  # currently unused by GeoNew.forward
-    adj = None  # currently unused by GeoNew.forward
-
-    # Per-sample sparse operators (identity is enough for a wiring test)
-    K_list = _make_sparse_identity_list(B, N, device=device)
-    M_list = _make_sparse_identity_list(B, N, device=device)
-
-    # Dirichlet masks/values per node and field
-    dirichlet_nodes = (torch.rand(B, N, n_fields, device=device) < 0.1)
-    boundary_vals = torch.zeros(B, N, n_fields, device=device)
-
-    out = geo_new(
-        in_tokens=in_tokens,
-        query_tokens=query_tokens,
-        adj=adj,
-        K_list=K_list,
-        M_list=M_list,
-        dirichlet_nodes=dirichlet_nodes,
-        boundary_vals=boundary_vals,
+    # load in pre-processed data and create dataloaders
+    data_file = "data/processed_polypoisson_id.pt"
+    train_loader, val_loader = utils.create_dataloaders(
+        train_file=data_file,
+        train_range=(0, 400),
+        val_range=(400, 500),
+        batch_size=8,
+        device=str(device),
+        hks_steps=8,
+        use_coords=False,
+        use_poisson=False,
+        use_harmonic=True,
     )
 
-    print("u_fine:", tuple(out["u_fine"].shape))
-    print("u_coarse:", tuple(out["u_coarse"].shape))
-    print("converged:", out["converged"].float().mean().item(), "mean")
-    print("n_iters:", out["n_iters"])
+    encoder_in_dim = next(iter(train_loader))["tokens"].shape[-1]
+    geo_new = utils.setup_GeoNew_model(encoder_in_dim=encoder_in_dim).to(device)
+
+    print("Model parameters:", geo_new.get_full_parameter_count())
+    print("Train samples:", len(train_loader.dataset), "| Val samples:", len(val_loader.dataset))
+
+    optimizer = torch.optim.Adam(geo_new.parameters(), lr=1e-3)
+
+    # train for 500 epochs, should be sub 1% error on train and validation by 50 
+    n_epochs = 500
+    for epoch in range(1, n_epochs + 1):
+        train_rel, train_conv = run_epoch(
+            geo_new=geo_new,
+            loader=train_loader,
+            optimizer=optimizer,
+            train=True,
+        )
+        val_rel, val_conv = run_epoch(
+            geo_new=geo_new,
+            loader=val_loader,
+            optimizer=optimizer,
+            train=False,
+        )
+
+        print(
+            f"Epoch {epoch:04d} | "
+            f"train rel={train_rel:.4e} conv={train_conv:.3f} | "
+            f"val rel={val_rel:.4e} conv={val_conv:.3f}"
+        )
 
 if __name__ == "__main__":
     main()
